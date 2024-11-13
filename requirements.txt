@@ -1,0 +1,14 @@
+# GitHub repositories
+git+https://github.com/finnschwall/rixaplugin
+git+https://github.com/finnschwall/PyALM#egg=pyalm[normal]
+
+# Regular packages
+pandas==1.3.3
+numpy==1.21.2
+shap==0.39.0
+torch==1.9.0
+scikit-learn==0.24.2
+matplotlib==3.4.3
+lime==0.2.0.1
+dice-ml==0.8
+joblib==1.0.1
