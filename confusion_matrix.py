@@ -73,7 +73,7 @@ def load_label_encoders():
     for feature, path in label_encoder_files.items():
         label_encoders[feature] = joblib.load(path)
 
-# Load label encoders during initialization
+# Load label encoders 
 load_label_encoders()
 
 # Device selection: GPU 3 or 4 if available, otherwise CPU
