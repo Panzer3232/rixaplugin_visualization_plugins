@@ -13,23 +13,24 @@ import base64
 from sklearn.preprocessing import StandardScaler
 import json
 import logging
+import plotly.express as px
 from lime.lime_tabular import LimeTabularExplainer
 import re
 import dice_ml
 from dice_ml import Dice
 from dice_ml.model_interfaces.base_model import BaseModel
 
-# plugin variables
+# Define plugin variables
 model_path = rixaplugin.variables.PluginVariable("model_path", str, default="nn_model_hotel_state_dict.pth")
 scaler_path = rixaplugin.variables.PluginVariable("scaler_path", str, default="scaler_hotel.pkl")
 X_test_path = rixaplugin.variables.PluginVariable("X_test_path", str, default="x_test_hotel.csv")
 y_test_path = rixaplugin.variables.PluginVariable("y_test_path", str, default="y_test_hotel.csv")
 
-# logger for debugging
+# Initialize logger for debugging
 your_logger = logging.getLogger("rixa.plugin_logger")
 your_logger.setLevel(logging.INFO)
 
-#paths for the label encoder files
+# Define the paths for the label encoder files
 label_encoder_files = {
     "arrival_date_month": "/home/ies/ashri/RIXA-2/rixaplugin/rixaplugin/label_encoder_arrival_date_month.pkl",
     "country": "/home/ies/ashri/RIXA-2/rixaplugin/rixaplugin/label_encoder_country.pkl",
@@ -44,7 +45,7 @@ model = None
 scaler = None
 X_test_unscaled = None
 y_test = None
-datapoints_list = [106, 2342, 78, 234, 12, 45, 9876, 10234, 1, 23, 332, 675, 22132, 2329, 761, 442, 5673, 15345, 18221, 991]
+datapoints_list = [16505, 2342, 11486, 234, 4225, 45, 12117, 10677, 14757, 3364, 332, 7788, 890, 19666, 761, 22828, 12571, 8921, 6001, 17964]
 current_datapoint_index = -1  
 current_datapoint_id = None
 features = [
@@ -53,6 +54,14 @@ features = [
     'previous_cancellations', 'arrival_date_month', 'stays_in_week_nights',
     'booking_changes', 'stays_in_weekend_nights', 'reserved_room_type',
     'adults', 'hotel', 'children'
+]
+display_order = [
+    'hotel', 'reserved_room_type', 'lead_time', 'deposit_type', 'market_segment',
+    'arrival_date_week_number', 'arrival_date_day_of_month', 'arrival_date_month',
+    'adults', 'children', 'country',
+    'previous_cancellations', 'booking_changes', 'total_of_special_requests',
+    'stays_in_week_nights', 'stays_in_weekend_nights',
+    'adr'
 ]
 
 label_encoders = {}
@@ -64,15 +73,16 @@ def load_label_encoders():
     for feature, path in label_encoder_files.items():
         label_encoders[feature] = joblib.load(path)
 
-# label encoders during initialization
+# Load label encoders during initialization
 load_label_encoders()
 
+# Device selection: GPU 3 or 4 if available, otherwise CPU
 device = torch.device("cuda:3" if torch.cuda.is_available() and torch.cuda.device_count() > 3 else
                       "cuda:4" if torch.cuda.is_available() and torch.cuda.device_count() > 4 else
                       "cpu")
 your_logger.info(f"Using device: {device}")
 
-#  Neural Network Model class
+# Define the Neural Network Model class
 class NeuralNet(nn.Module):
     def __init__(self, input_size, hidden_size1, hidden_size2, hidden_size3, hidden_size4, hidden_size5, hidden_size6, num_classes):
         super(NeuralNet, self).__init__()
@@ -192,7 +202,7 @@ def filter_data(data, **kwargs):
 def format_feature_name(name):
     return name.replace("_", " ").title()
 
-# DiCE-compatible model wrapper
+# Define a DiCE-compatible model wrapper
 class CustomPyTorchModel(BaseModel):
     def __init__(self, predict_fn, backend='PYT'):
         super().__init__(model=None, backend=backend)
@@ -201,43 +211,36 @@ class CustomPyTorchModel(BaseModel):
     def get_output(self, input_instance, transform_data=False):
         return self.predict_fn(input_instance)
 
-#  format feature names
+
 def format_feature_name(name):
     return name.replace("_", " ").title()  
 
-# reset function
-@plugfunc()
-def reset():
+def generate_datapoint_info():
     """
-    Resets the current datapoint index to the beginning of the datapoints_list,
-    so that the next call to next_datapoint() will start from the first datapoint.
+    Generates the explanation and JSON structure for the current datapoint including confidence score and feature values.
     """
-    global current_datapoint_index, current_datapoint_id
-    
-    # Reset to the initial state (first datapoint in the list)
-    current_datapoint_index = 0
-    current_datapoint_id = datapoints_list[current_datapoint_index]
-    
-    # Retrieve the true target label
+    global current_datapoint_id
+
+    # true target label
     true_target = 'Canceled' if y_test[current_datapoint_id] == 0 else 'Check-Out'
 
     # Extract features, decode them, and perform scaling for model input
     features_data = X_test_unscaled.iloc[current_datapoint_id][features]
-    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]
+    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]  
     scaled_features = scaler.transform(features_data.values.reshape(1, -1))
     scaled_features_tensor = torch.tensor(scaled_features, dtype=torch.float32).to(device)
 
-    # model predictions and confidence
+    #  model predictions and confidence
     with torch.no_grad():
         output = model(scaled_features_tensor)
         confidence_score = torch.nn.functional.softmax(output, dim=1).max().item() * 100
-        confidence_score = round(confidence_score, 3)
+        confidence_score = round(confidence_score, 2)
         predicted_class = output.argmax().item()
 
-    # Map predicted class to label
+    # predicted class to label
     predicted_class_str = 'Canceled' if predicted_class == 0 else 'Check-Out'
 
-    # JSON structure 
+    # Prepare JSON structure 
     datapoint_info = {
         "role": "datapoint",
         "content": {
@@ -246,62 +249,75 @@ def reset():
             "true_target": true_target,
             "data": {
                 format_feature_name(feature): {"title": format_feature_name(feature), "value": decoded_features_data[feature]}
-                for feature in features
+                for feature in display_order
             }
         }
     }
 
+    # explanation text
+    explanation = f"The confidence score of this datapoint is {confidence_score}%. "
+    explanation += f"This means the model is {confidence_score}% confident that the booking will result in a {predicted_class_str.lower()}."
+    explanation += "\nFeature values:\n"
+    for feature in display_order:
+        explanation += f"- {format_feature_name(feature)}: {decoded_features_data[feature]}\n"
+
+    return explanation.strip(), datapoint_info
+
+
+
+@plugfunc()
+def reset():
+    """
+    Resets the current datapoint index to the beginning of the datapoints_list,
+    so that the next call to next_datapoint() will start from the first datapoint.
+    Whenever reset is called explanation and datapoint_info is updated each time make sure it shows data of updated current datapoint.
+    """
+    global current_datapoint_index, current_datapoint_id
+    
+    # Reset to the initial state 
+    current_datapoint_index = 0
+    current_datapoint_id = datapoints_list[current_datapoint_index]
+    
+    # Generate datapoint information and explanation
+    explanation, datapoint_info = generate_datapoint_info()
+    
+    # Display the datapoint information as JSON on the frontend
     api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
     your_logger.info("Datapoint index has been reset to the first entry in datapoints_list.")
+    
+    # Update the frontend banner with settings
+    settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
+    api.display(custom_msg=json.dumps(settings_dic, ensure_ascii=True))
+    your_logger.info("Frontend banner updated.")
+    
+    return explanation.strip()
 
 
-# next_datapoint function
 @plugfunc()
 def next_datapoint():
+    """
+    Moves to the next datapoint and updates the explanation for the chatbot.
+    Whenever this function is called or confirm button is clicked explanation and datapoint_info is updated each time make sure it shows data of updated current datapoint.
+    """
     global current_datapoint_index, current_datapoint_id
 
     # Move to the next datapoint
     current_datapoint_index = (current_datapoint_index + 1) % len(datapoints_list)
     current_datapoint_id = datapoints_list[current_datapoint_index]
 
-    # Retrieve the true target label
-    true_target = 'Canceled' if y_test[current_datapoint_id] == 0 else 'Check-Out'
-
-    # Extract features, decode them, and perform scaling for model input
-    features_data = X_test_unscaled.iloc[current_datapoint_id][features]
-    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]
-    scaled_features = scaler.transform(features_data.values.reshape(1, -1))
-    scaled_features_tensor = torch.tensor(scaled_features, dtype=torch.float32).to(device)
-
-    # model predictions and confidence
-    with torch.no_grad():
-        output = model(scaled_features_tensor)
-        confidence_score = torch.nn.functional.softmax(output, dim=1).max().item() * 100
-        confidence_score = round(confidence_score, 3)
-        predicted_class = output.argmax().item()
-
-    predicted_class_str = 'Canceled' if predicted_class == 0 else 'Check-Out'
-
-    #  JSON structure 
-    datapoint_info = {
-        "role": "datapoint",
-        "content": {
-            "prediction": predicted_class_str,
-            "confidence": confidence_score,
-            "true_target": true_target,
-            "data": {
-                format_feature_name(feature): {"title": format_feature_name(feature), "value": decoded_features_data[feature]}
-                for feature in features
-            }
-        }
-    }
-
+    # Generate datapoint information and explanation
+    explanation, datapoint_info = generate_datapoint_info()
+    
+    # Display the datapoint information as JSON on the frontend
     api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
     your_logger.info(f"Datapoint information displayed on frontend for datapoint id: {current_datapoint_id}")
     
+    # Update the frontend banner with settings
     settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
     api.display(custom_msg=json.dumps(settings_dic, ensure_ascii=True))
     your_logger.info("Frontend banner updated.")
+    
+    return explanation.strip()
 
 
 @plugfunc()
@@ -325,40 +341,39 @@ def explain_with_lime():
                 probabilities = torch.nn.functional.softmax(model(X_tensor), dim=1).cpu().numpy()
             return probabilities
 
-        #  LIME explainer on the scaled dataset
+        # Initialize the LIME explainer on the scaled dataset with modified feature names
         lime_explainer = LimeTabularExplainer(
             scaler.transform(X_test_unscaled[features]), 
-            feature_names=[format_feature_name(feature) for feature in features],
+            feature_names=[format_feature_name(feature).replace("_", " ") for feature in features],
             class_names=['Canceled', 'Check-Out'],
             mode='classification'
         )
 
-        # explanation for the current datapoint
+        # Generate the explanation for the current datapoint
         explanation = lime_explainer.explain_instance(scaled_features[0], predict_proba, num_features=len(features))
-   
-        explanation_list = [(format_feature_name(feature), contribution) for feature, contribution in explanation.as_list() if contribution != 0]
 
-     # Remove any numerical ranges, inequalities, or constraints from feature names
-        cleaned_feature_names = [re.sub(r"(<|>|<=|>=|==|!=)?\s?-?\d*\.?\d*", "", feature).strip() for feature, _ in explanation_list]
+        # Format and clean feature names for display
+        explanation_list = [(format_feature_name(feature).replace("_", " "), contribution) for feature, contribution in explanation.as_list() if contribution != 0]
+
+        # Remove any numerical ranges, constraints, and equals signs from feature names
+        cleaned_feature_names = [re.sub(r"(<|>|<=|>=|==|!=)?\s?-?\d*\.?\d*", "", feature).strip().replace("=", "") for feature, _ in explanation_list]
         contributions = [contribution for _, contribution in explanation_list]
 
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.barh(cleaned_feature_names, contributions, color=['red' if c < 0 else 'green' for c in contributions])
-        ax.set_xlabel("Contribution to Prediction")
-        ax.set_title(f"LIME Explanation")
+        # Plot only the impactful features with cleaned names
+        fig = px.bar(x=contributions, y=cleaned_feature_names, orientation='h', 
+                     labels={'x': 'Contribution to Prediction', 'y': 'Feature'},
+                     title='LIME Explanation', 
+                     color=contributions, 
+                     color_continuous_scale=["red", "green"])
 
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')  
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        buf.close()
+        # Generate and display the interactive HTML plot
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        api.display(html="<!--LIME-->"+html)
 
-        html = f'<img src="data:image/png;base64,{img_base64}" style="background-color:white;height:100%; width:auto"/>'
-        api.display(html=html)
-
+        # Convert LIME explanation to text for LLM summary
         lime_text_explanation = explanation.as_list()
-        text_summary = f"LIME Explanation :\n"
-        text_summary += "\n".join([f"{feature}: {contribution:.4f}" for feature, contribution in lime_text_explanation])
+        text_summary = f"LIME Explanation:\n"
+        text_summary += "\n".join([f"{feature.replace('_', ' ')}: {contribution:.4f}" for feature, contribution in lime_text_explanation])
 
         return text_summary
 
@@ -366,6 +381,7 @@ def explain_with_lime():
         error_message = f"An error occurred in LIME explanation: {str(e)}"
         api.display(html=f"<h3>{error_message}</h3>")
         return error_message
+
 
 @plugfunc()
 def generate_counterfactual_explanations(num_counterfactuals: int = 5):
@@ -381,7 +397,7 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         X_test = pd.read_csv(X_test_path.get())
         y_test = pd.read_csv(y_test_path.get(), header=None, names=["reservation_status"])
 
-        #continuous and categorical features
+        # Define continuous and categorical features
         continuous_features = ['lead_time', 'adr']
         categorical_features = [
             'deposit_type', 'country', 'total_of_special_requests', 'arrival_date_week_number',
@@ -391,11 +407,11 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         ]
         all_features = continuous_features + categorical_features
 
-        # continuous features only
+        # Standardize continuous features only
         scaler = StandardScaler()
         X_test[continuous_features] = scaler.fit_transform(X_test[continuous_features])
 
-       
+        # Define the prediction function
         def predict_fn(x):
             x = x[all_features]
             x[continuous_features] = scaler.transform(x[continuous_features])
@@ -405,7 +421,7 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
                 probs = model.predict_proba(x_tensor).cpu().numpy()
             return probs
 
-        # DiCE data interface
+        # Initialize DiCE data interface
         d = dice_ml.Data(
             dataframe=pd.concat([X_test, y_test], axis=1),
             continuous_features=continuous_features,
@@ -415,7 +431,7 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         custom_dice_model.model_type = 'classifier'
         exp = Dice(d, custom_dice_model)
 
-        #  current datapoint instance to explain
+        # Select the current datapoint instance to explain
         query_instance = X_test.iloc[[current_datapoint_id]].copy()
         query_instance = query_instance[all_features]
 
@@ -441,14 +457,14 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         # Combine decoded original and counterfactual data for display
         visual_df = pd.concat([original_instance_decoded, counterfactuals_data_decoded], ignore_index=True)
 
-        
+        # Replace `1` and `0` in `reservation_status` with `Check-Out` and `Canceled`
         visual_df['reservation_status'] = visual_df['reservation_status'].replace({1: 'Check-Out', 0: 'Canceled'})
 
-        
+        # Add row labels
         row_labels = ['Original Instance'] + [f'Counterfactual {i}' for i in range(1, len(visual_df))]
         visual_df.insert(0, 'Instance', row_labels)
 
-        
+        # Apply `format_feature_name` to all feature column names
         visual_df.columns = [format_feature_name(col) if col != "Instance" else col for col in visual_df.columns]
 
         # Replace matching values in counterfactuals with '-'
@@ -457,34 +473,24 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
                 if visual_df.loc[i, col] == visual_df.loc[0, col]:
                     visual_df.loc[i, col] = "-"
 
-        # Filter out columns where all counterfactual rows 
-        columns_to_keep = ['Instance'] + [
+        # Filter out columns where all counterfactual rows contain only dashes
+        columns_to_keep = [
             col for col in visual_df.columns[1:]
             if visual_df.loc[1:, col].ne("-").any()
         ]
         visual_df = visual_df[columns_to_keep]
 
-        fig, ax = plt.subplots(figsize=(14, 16))  
-        ax.axis('tight')
-        ax.axis('off')
+        html_table = visual_df.to_html(index=False, escape=False, border=1)
+        styled_html_table = f"""
+        <style>
+           table {{border-collapse: collapse; width: 100%;}}
+           th, td {{border: 1px solid black; padding: 10px; text-align: center;}}
+        </style>
+        {html_table}
+        """
+        api.display(html="<!--COUNTERFACTUAL-->"+styled_html_table)
 
-        table = ax.table(cellText=visual_df.values, colLabels=visual_df.columns, cellLoc='center', loc='center')
-        
-        table.auto_set_font_size(False)
-        table.set_fontsize(8) 
-        table.scale(1.8, 1.6) 
-
-        plt.title(f'Counterfactual Explanations', fontsize=18, weight='bold')
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=150) 
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        buf.close()
-        
-        html = f'<img src="data:image/png;base64,{img_base64}" style="background-color:white;height:100%; width:auto"/>'
-        api.display(html=html)
-
+        #explanation
         explanation = f"Here are the counterfactual explanations for data instance:\n\n"
         for i, row in visual_df.iterrows():
             row_type = "Original Instance" if i == 0 else f"Counterfactual {i}"
@@ -515,69 +521,53 @@ def draw_importances_dashboard(**kwargs) -> str:
     try:
         print("Generating feature importance dashboard...")
 
-        # filtering to dataset
+        # Apply filtering to dataset
         X_test_filtered_df = filter_data(X_test_unscaled.copy(), **kwargs) if kwargs else X_test_unscaled.copy()
 
         if X_test_filtered_df.empty:
             return "The filtered dataset is empty. Please provide valid filter parameters."
 
-        # 'reservation_status' is not in the features when scaling
+        # Ensure 'reservation_status' is not in the features when scaling
         y_test_filtered = X_test_filtered_df.pop('reservation_status').values
 
-        # Use only a random sample of 100 samples
+        # Use only a random sample of 100 records
         if len(X_test_filtered_df) > 100:
             X_test_filtered_df = X_test_filtered_df.sample(n=100, random_state=42)
             y_test_filtered = y_test_filtered[X_test_filtered_df.index]
 
+        # Scale the features using the scaler
         try:
-            X_test_scaled = scaler.transform(X_test_filtered_df[features])  
+            X_test_scaled = scaler.transform(X_test_filtered_df[features])  # Select only the feature columns for scaling
         except ValueError as e:
             return f"Error during scaling: {e}"
 
         # Convert to tensor for model input
         X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
 
-        # SHAP for feature importance
-        background = X_test_tensor[:80]  
+        # Use SHAP for feature importance
+        background = X_test_tensor[:80]  # Use the first 80 samples as the background
         explainer = shap.GradientExplainer(model, background)
         shap_values = explainer.shap_values(X_test_tensor)
 
-        #  mean absolute SHAP values for feature importance
+        # Calculate mean absolute SHAP values for feature importance
         shap_mean_abs = np.mean(np.abs(shap_values), axis=(0, 2))
         sorted_idx = np.argsort(shap_mean_abs)[::-1]
         sorted_features = [features[i] for i in sorted_idx]
         sorted_shap_values = shap_mean_abs[sorted_idx]
 
-        
+        # Decode and format feature names
         decoded_sorted_features = decode_features(pd.DataFrame([sorted_features])).iloc[0].tolist()
         formatted_sorted_features = [format_feature_name(feature) for feature in decoded_sorted_features]
 
-        
-        plt.figure(figsize=(12, 8))
-        bars = plt.barh(formatted_sorted_features, sorted_shap_values)
-        plt.xlabel("Shapley Value (Feature Importance)")
-        plt.title("Feature Importance based on Shapley Values")
-        plt.gca().invert_yaxis()
-        
-        
-        plt.yticks(fontsize=8)
+        fig = px.bar(x=formatted_sorted_features, y=sorted_shap_values, 
+                     labels={'x': 'Feature', 'y': 'Shapley Value'},
+                     title='Shapley Values')
 
-        
-        for bar, value in zip(bars, sorted_shap_values):
-            plt.text(value, bar.get_y() + bar.get_height()/2, f'{value:.2f}', va='center')
+        # Convert the Plotly figure to an HTML string
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        api.display(html="<!--SHAP-->"+html)
 
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)  
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        buf.close()
-
-        
-        html = f'<img src="data:image/png;base64,{img_base64}" style="background-color:white;width:100%"/>'
-        api.display(html=html)
-
-        
+        # Explanation for LLM with formatted feature names
         explanation = f"""
         Feature Importance Analysis:
 
@@ -610,13 +600,13 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
     try:
         print("Generating PDP Dashboard...")
         
-        # provided features are valid
+        # Verify if provided features are valid
         for feature in pdp_features:
             if feature not in features:
                 print(f"Invalid feature: {feature}")
                 return f"The feature '{feature}' is not valid."
 
-        
+        # Apply filters to the dataset
         X_filtered = filter_data(X_test_unscaled.copy(), **kwargs) if kwargs else X_test_unscaled.copy()
         if X_filtered.empty:
             print("Filtered dataset is empty.")
@@ -626,7 +616,7 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
         decoded_pdp_features = decode_features(pd.DataFrame([pdp_features])).iloc[0].tolist()
         formatted_pdp_features = [format_feature_name(feature) for feature in decoded_pdp_features]
 
-       
+        # Function to calculate partial dependence
         def calculate_partial_dependence(model, X_unscaled, feature, target_class, grid_resolution=70):
             original_values = X_unscaled[feature]
             feature_values = np.linspace(original_values.min(), original_values.max(), grid_resolution)
@@ -646,40 +636,43 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
 
             return feature_values, avg_predictions
 
-       
-        plt.figure(figsize=(12, 8)) 
+        # Initialize plot
+        plt.figure(figsize=(12, 8))  # Larger plot size for better readability
         target_label = "Canceled" if target_class == 0 else "Check-Out"
         explanation = f"Partial Dependence Plot for target class '{target_label}':\n"
 
         # Calculate and plot PDP for each feature
+        data = []
+        truncated_explanation = ""
+        truncate_limit = 10
         for feature, formatted_feature in zip(pdp_features, formatted_pdp_features):
             feature_values, avg_predictions = calculate_partial_dependence(
                 model, X_filtered, feature, target_class, grid_resolution=70
             )
-            plt.plot(feature_values, avg_predictions, label=f'PDP of {formatted_feature} (Target Class: {target_class})')
+            df = pd.DataFrame({"Feature Value": feature_values, "Average Prediction": avg_predictions, "Feature": formatted_feature})
+            data.append(df)
             
-            # Append data for LLM text summary
             explanation += f"\nFeature: {formatted_feature}\n"
-            for val, pred in zip(feature_values, avg_predictions):
+            truncated_explanation += f"\nFeature: {formatted_feature}\n"
+
+            # Limit the number of feature values passed to LLM
+            for val, pred in zip(feature_values[:truncate_limit], avg_predictions[:truncate_limit]):
                 explanation += f"  - Feature Value: {val:.2f}, Average Prediction: {pred:.4f}\n"
+                truncated_explanation += f"  - Feature Value: {val:.2f}, Average Prediction: {pred:.4f}\n"
 
-        
-        plt.xlabel('Feature Value')
-        plt.ylabel(f'Average Prediction Probability for Class {target_label}')
-        plt.title(f'Partial Dependence Plot for Selected Features ({target_label})')
-        plt.legend()
-        
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        buf.close()
+            explanation += "  ... (truncated for brevity)\n"
 
-        html = f'<img src="data:image/png;base64,{img_base64}" style="background-color:white;width:100%"/>'
-        api.display(html=html)
+        # Combine data and create the plot
+        full_df = pd.concat(data)
+        fig = px.line(full_df, x="Feature Value", y="Average Prediction", color="Feature",
+                      title=f"Partial Dependence Plot for [{', '.join(formatted_pdp_features)}] ({target_label})")
+
+        # Convert the Plotly figure to an HTML string
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        api.display(html="<!--PDP-->"+html)
         
-        return explanation.strip()
+        # Return the truncated PDP analysis explanation for the LLM
+        return truncated_explanation.strip()
 
     except Exception as e:
         error_message = f"An error occurred: {str(e)}"
