@@ -46,7 +46,7 @@ scaler = None
 X_test_unscaled = None
 y_test = None
 datapoints_list = [16505, 2342, 11486, 234, 4225, 45, 12117, 10677, 14757, 3364, 332, 7788, 890, 19666, 761, 22828, 12571, 8921, 6001, 17964]
-current_datapoint_index = -1  
+current_datapoint_index = 0 
 current_datapoint_id = None
 features = [
     'deposit_type', 'lead_time', 'country', 'total_of_special_requests', 'adr',
@@ -73,7 +73,7 @@ def load_label_encoders():
     for feature, path in label_encoder_files.items():
         label_encoders[feature] = joblib.load(path)
 
-# Load label encoders 
+# Load label encoders during initialization
 load_label_encoders()
 
 # Device selection: GPU 3 or 4 if available, otherwise CPU
@@ -226,7 +226,7 @@ def generate_datapoint_info():
 
     # Extract features, decode them, and perform scaling for model input
     features_data = X_test_unscaled.iloc[current_datapoint_id][features]
-    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]  
+    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]  # Decode feature values
     scaled_features = scaler.transform(features_data.values.reshape(1, -1))
     scaled_features_tensor = torch.tensor(scaled_features, dtype=torch.float32).to(device)
 
@@ -284,6 +284,27 @@ def reset():
     # Display the datapoint information as JSON on the frontend
     api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
     your_logger.info("Datapoint index has been reset to the first entry in datapoints_list.")
+    
+    # Update the frontend banner with settings
+    settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
+    api.display(custom_msg=json.dumps(settings_dic, ensure_ascii=True))
+    your_logger.info("Frontend banner updated.")
+    
+    return explanation.strip()
+
+
+@plugfunc()
+def show_datapoint():
+    global current_datapoint_index, current_datapoint_id
+    # Move to the next datapoint
+    current_datapoint_id = datapoints_list[current_datapoint_index]
+
+    # Generate datapoint information and explanation
+    explanation, datapoint_info = generate_datapoint_info()
+    
+    # Display the datapoint information as JSON on the frontend
+    api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
+    your_logger.info(f"Datapoint information displayed on frontend for datapoint id: {current_datapoint_id}")
     
     # Update the frontend banner with settings
     settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
