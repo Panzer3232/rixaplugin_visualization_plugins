@@ -47,7 +47,7 @@ model = None
 scaler = None
 X_test_unscaled = None
 y_test = None
-datapoints_list = [16505, 2342, 11486, 234, 23171, 45, 12117, 10677, 14757, 3364, 332, 7788, 890, 19666, 761, 22828, 12571, 8921, 6001, 17964]
+datapoints_list = [16505, 2342, 11486, 234, 23171, 4225, 12117, 10677, 14757, 3364, 332, 7788, 890, 19666, 761, 22828, 12571, 8921, 6001, 17964]
 current_datapoint_index = 0 
 current_datapoint_id = None
 features = [
@@ -461,13 +461,12 @@ def explain_with_lime():
         api.display(html=f"<h3>{error_message}</h3>")
         return error_message
 
-
 @plugfunc()
 def generate_counterfactual_explanations(num_counterfactuals: int = 5):
     """
     Generates counterfactual explanations for the current datapoint in the test dataset.
     """
-    global current_datapoint_id
+    global current_datapoint_id, scaler, model, features
 
     try:
         your_logger.info(f"Generating counterfactual explanations for datapoint ID: {current_datapoint_id}")
@@ -484,25 +483,20 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
             'adults', 'hotel', 'children', 'arrival_date_day_of_month', 'arrival_date_month',
             'stays_in_week_nights', 'stays_in_weekend_nights'
         ]
-        all_features = continuous_features + categorical_features
 
-        # Standardize continuous features only
-        scaler = StandardScaler()
-        X_test[continuous_features] = scaler.fit_transform(X_test[continuous_features])
-
-        # Define the prediction function
+        # Define the prediction function using the global scaler
         def predict_fn(x):
-            x = x[all_features]
-            x[continuous_features] = scaler.transform(x[continuous_features])
-            x = x.apply(pd.to_numeric, errors='coerce').fillna(0)
-            x_tensor = torch.tensor(x.values, dtype=torch.float32).to(device)
+            # Use only the features the model expects
+            x_features = x[features].copy()
+            # Use the global scaler instead of the local one
+            x_tensor = torch.tensor(scaler.transform(x_features.values), dtype=torch.float32).to(device)
             with torch.no_grad():
                 probs = model.predict_proba(x_tensor).cpu().numpy()
             return probs
 
         # Initialize DiCE data interface
         d = dice_ml.Data(
-            dataframe=pd.concat([X_test, y_test], axis=1),
+            dataframe=pd.concat([X_test[features], y_test], axis=1),
             continuous_features=continuous_features,
             outcome_name='reservation_status'
         )
@@ -512,24 +506,29 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
 
         # Select the current datapoint instance to explain
         query_instance = X_test.iloc[[current_datapoint_id]].copy()
-        query_instance = query_instance[all_features]
+        
+        # Get model prediction directly using the same approach as in next_datapoint
+        features_data = X_test_unscaled.iloc[current_datapoint_id][features]
+        scaled_features_tensor = torch.tensor(scaler.transform(features_data.values.reshape(1, -1)), dtype=torch.float32).to(device)
+        
+        with torch.no_grad():
+            output = model(scaled_features_tensor)
+            predicted_class = output.argmax().item()
 
-        # Generate counterfactuals
-        counterfactuals = exp.generate_counterfactuals(query_instance, total_CFs=num_counterfactuals, desired_class="opposite")
+        # Generate counterfactuals with features the model expects
+        counterfactuals = exp.generate_counterfactuals(query_instance[features], total_CFs=num_counterfactuals, desired_class="opposite")
 
         # Process and display counterfactuals
-        counterfactuals_data = counterfactuals.cf_examples_list[0].final_cfs_df[all_features]
-        counterfactuals_data['reservation_status'] = 1 - y_test.iloc[current_datapoint_id].values[0]
-        counterfactuals_data[continuous_features] = scaler.inverse_transform(counterfactuals_data[continuous_features])
-        counterfactuals_data[continuous_features] = counterfactuals_data[continuous_features].round(2)
+        counterfactuals_data = counterfactuals.cf_examples_list[0].final_cfs_df
+        
+        # Use model prediction instead of true label
+        counterfactuals_data['reservation_status'] = 1 - predicted_class
+        
+        # Create original instance with the model's prediction
+        original_instance = query_instance[features].copy()
+        original_instance['reservation_status'] = predicted_class
 
-        # Inverse transform the original instance continuous features
-        original_instance = query_instance.copy()
-        original_instance[continuous_features] = scaler.inverse_transform(original_instance[continuous_features])
-        original_instance[continuous_features] = original_instance[continuous_features].round(2)
-        original_instance['reservation_status'] = y_test.iloc[current_datapoint_id].values[0]
-
-        # Decode only the encoded features for both original and counterfactual instances
+        # Decode features for display
         original_instance_decoded = decode_features(original_instance)
         counterfactuals_data_decoded = decode_features(counterfactuals_data)
 
@@ -553,10 +552,11 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
                     visual_df.loc[i, col] = "-"
 
         # Filter out columns where all counterfactual rows contain only dashes
-        columns_to_keep = [
-            col for col in visual_df.columns[1:]
-            if visual_df.loc[1:, col].ne("-").any()
-        ]
+        columns_to_keep = []
+        for col in visual_df.columns[1:]:
+            if visual_df.loc[1:, col].ne("-").any():
+                columns_to_keep.append(col)
+        
         visual_df = visual_df[columns_to_keep]
 
         html_table = visual_df.to_html(index=False, escape=False, border=1)
@@ -569,19 +569,20 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         """
         api.display(html="<!--COUNTERFACTUAL-->"+styled_html_table)
 
-        #explanation
-        explanation = f"Here are the counterfactual explanations for data instance:\n\n"
+        # Create explanation text
+        explanation_text = f"Here are the counterfactual explanations for data instance:\n\n"
         for i, row in visual_df.iterrows():
             row_type = "Original Instance" if i == 0 else f"Counterfactual {i}"
-            changes = [f"{col}: {val}" for col, val in row.items() if val != '-' or col == 'Reservation Status']
-            explanation += f"\n- **{row_type}**: " + ', '.join(changes)
+            changes = [f"{col}: {val}" for col, val in row.items() if val != '-' and col != 'Instance']
+            explanation_text += f"\n- **{row_type}**: " + ', '.join(changes)
 
-        return explanation.strip()
+        return explanation_text.strip()
     
     except Exception as e:
         error_message = f"An error occurred in counterfactual explanation: {str(e)}"
         api.display(html=f"<h3>{error_message}</h3>")
-        return error_message 
+        return error_message
+
 
 
 @plugfunc()
