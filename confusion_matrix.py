@@ -34,7 +34,6 @@ your_logger.setLevel(logging.INFO)
 
 # Define the paths for the label encoder files
 label_encoder_files = {
-    "arrival_date_month": "/home/ies/ashri/RIXA-2/rixaplugin/rixaplugin/label_encoder_arrival_date_month.pkl",
     "country": "/home/ies/ashri/RIXA-2/rixaplugin/rixaplugin/label_encoder_country.pkl",
     "deposit_type": "/home/ies/ashri/RIXA-2/rixaplugin/rixaplugin/label_encoder_deposit_type.pkl",
     "hotel": "/home/ies/ashri/RIXA-2/rixaplugin/rixaplugin/label_encoder_hotel.pkl",
@@ -47,7 +46,7 @@ model = None
 scaler = None
 X_test_unscaled = None
 y_test = None
-datapoints_list = [16505, 2342, 11486, 234, 23171, 4225, 12117, 10677, 14757, 3364, 332, 7788, 890, 19666, 761, 22828, 12571, 8921, 6001, 17964]
+datapoints_list = [111235, 85498, 56168, 22730, 81743, 52028, 8723, 78335, 80601, 68689, 16948, 37601, 68227, 60052, 106685,10233 ]
 current_datapoint_index = 0 
 current_datapoint_id = None
 features = [
@@ -81,7 +80,8 @@ INTEGER_FEATURES = {
     "market_segment",
     "country",
     "hotel",
-    "deposit_type"
+    "deposit_type", 
+    "arrival_date_month"
 }
 
 label_encoders = {}
@@ -163,8 +163,9 @@ def initialize_model_and_data():
 
     # Load test data
     X_test_unscaled = pd.read_csv(X_test_path.get())
-    y_test = pd.read_csv(y_test_path.get(), header=None).values.ravel()
+    y_test = pd.read_csv(y_test_path.get(), header=0).values.ravel()
     X_test_unscaled['reservation_status'] = y_test
+
     your_logger.info("Test data loaded.")
 
 def decode_features(data):
@@ -176,17 +177,36 @@ def decode_features(data):
     room_type_mapping = {
         'A': 'Standard Room', 'B': 'Deluxe Room', 'C': 'Family Room',
         'D': 'Suite Room', 'E': 'Executive Room', 'F': 'Superior Room',
-        'G': 'Penthouse Suite', 'H': 'Junior Suite', 'I': 'Luxury Room',
-        'J': 'Presidential Suite'
+        'G': 'Penthouse Suite', 'H': 'Junior Suite', 'L': 'Luxury Room',
+        'P': 'Presidential Suite'
     }
     
+    int_to_month = {
+        0: 'January', 1: 'February', 2: 'March', 3: 'April',
+        4: 'May', 5: 'June', 6: 'July', 7: 'August',
+        8: 'September', 9: 'October', 10: 'November', 11: 'December'
+    }
+
+    # Inverse-transform for label-encoded features
     for feature, encoder in label_encoders.items():
         if feature in decoded_data:
             decoded_data[feature] = encoder.inverse_transform(decoded_data[feature].astype(int))
     
-    # Apply room type mapping for display
+    # room type mapping for display
     if 'reserved_room_type' in decoded_data:
-        decoded_data['reserved_room_type'] = decoded_data['reserved_room_type'].map(room_type_mapping).fillna(decoded_data['reserved_room_type'])
+        decoded_data['reserved_room_type'] = (
+            decoded_data['reserved_room_type']
+            .map(room_type_mapping)
+            .fillna(decoded_data['reserved_room_type'])
+        )
+
+    #Decode month codes 
+    if 'arrival_date_month' in decoded_data:
+        decoded_data['arrival_date_month'] = (
+            decoded_data['arrival_date_month']
+            .map(int_to_month)
+            .fillna(decoded_data['arrival_date_month'])
+        )
 
     return decoded_data
 
@@ -239,29 +259,36 @@ def format_feature_name(name):
 def generate_datapoint_info():
     """
     Generates the explanation and JSON structure for the current datapoint including confidence score and feature values.
+    Interprets current_datapoint_id as an 'original_id' in X_test_unscaled.
     """
     global current_datapoint_id
 
-    # true target label
-    true_target = 'Canceled' if y_test[current_datapoint_id] == 0 else 'Check-Out'
+    # 1) Find the row in X_test_unscaled where original_id matches current_datapoint_id
+    matching_rows = X_test_unscaled.index[X_test_unscaled["original_id"] == current_datapoint_id]
+    if len(matching_rows) == 0:
+        raise ValueError(f"No row found with original_id={current_datapoint_id}")
+    row_idx = matching_rows[0]
 
-    # Extract features, decode them, and perform scaling for model input
-    features_data = X_test_unscaled.iloc[current_datapoint_id][features]
-    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]  # Decode feature values
+    # 2) true target label from y_test
+    #    We also need to use row_idx here so we match the same row
+    true_target = 'Canceled' if y_test[row_idx] == 0 else 'Check-Out'
+
+    # 3) Extract features from that row, decode them, scale them for model input
+    features_data = X_test_unscaled.loc[row_idx, features]
+    decoded_features_data = decode_features(features_data.to_frame().T).iloc[0]
     scaled_features = scaler.transform(features_data.values.reshape(1, -1))
     scaled_features_tensor = torch.tensor(scaled_features, dtype=torch.float32).to(device)
 
-    #  model predictions and confidence
+    # 4) Model predictions and confidence
     with torch.no_grad():
         output = model(scaled_features_tensor)
         confidence_score = torch.nn.functional.softmax(output, dim=1).max().item() * 100
         confidence_score = round(confidence_score, 2)
         predicted_class = output.argmax().item()
 
-    # predicted class to label
     predicted_class_str = 'Canceled' if predicted_class == 0 else 'Check-Out'
 
-    # Prepare JSON structure 
+    # 5) Prepare JSON structure
     datapoint_info = {
         "role": "datapoint",
         "content": {
@@ -269,13 +296,16 @@ def generate_datapoint_info():
             "confidence": confidence_score,
             "true_target": true_target,
             "data": {
-                format_feature_name(feature): {"title": format_feature_name(feature), "value": decoded_features_data[feature]}
+                format_feature_name(feature): {
+                    "title": format_feature_name(feature),
+                    "value": decoded_features_data[feature]
+                }
                 for feature in display_order
             }
         }
     }
 
-    # explanation text
+    # 6) Explanation text
     explanation = f"The confidence score of this datapoint is {confidence_score}%. "
     explanation += f"This means the model is {confidence_score}% confident that the booking will result in a {predicted_class_str.lower()}."
     explanation += "\nFeature values:\n"
@@ -284,6 +314,17 @@ def generate_datapoint_info():
 
     return explanation.strip(), datapoint_info
 
+def unify_feature_name(name: str) -> str:
+    """
+    Converts a user-typed feature name into a canonical format 
+    that matches the dataset's column names.
+    E.g., "Market Segment" -> "market_segment"
+          "Deposit Type"   -> "deposit_type"
+    """
+    result = name.strip().lower().replace(" ", "_")
+    while "__" in result:
+        result = result.replace("__", "_")
+    return result
 
 
 @plugfunc()
@@ -291,19 +332,18 @@ def reset(datapoint_id=None):
     """
     Resets the current datapoint index to the beginning of the datapoints_list,
     so that the next call to next_datapoint() will start from the first datapoint.
-    Whenever reset is called explanation and datapoint_info is updated each time make sure it shows data of updated current datapoint.
+    If datapoint_id is provided, jumps directly to that original_id in datapoints_list.
     """
     global current_datapoint_index, current_datapoint_id
     
     if datapoint_id is not None:
-        # If datapoint_id is provided, find its index in the datapoints_list
         if datapoint_id in datapoints_list:
             current_datapoint_index = datapoints_list.index(datapoint_id)
         else:
             raise ValueError(f"Datapoint ID {datapoint_id} not found in datapoints_list.")
     else:
-        # Reset to the initial state
         current_datapoint_index = 0
+
     current_datapoint_id = datapoints_list[current_datapoint_index]
     
     # Generate datapoint information and explanation
@@ -311,82 +351,64 @@ def reset(datapoint_id=None):
     
     # Display the datapoint information as JSON on the frontend
     api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
-    your_logger.info("Datapoint index has been reset to the first entry in datapoints_list.")
+    your_logger.info("Datapoint index has been reset or updated based on 'datapoint_id' argument.")
     
     # Update the frontend banner with settings
     settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
     api.display(custom_msg=json.dumps(settings_dic, ensure_ascii=True))
-    your_logger.info("Frontend banner updated.")
     
     return explanation.strip()
 
 @plugfunc()
 def show_datapoint(datapoint_id=None):
     global current_datapoint_index, current_datapoint_id
-    # Move to the next datapoint
+    
     if datapoint_id is not None:
-        # If datapoint_id is provided, find its index in the datapoints_list
         if datapoint_id in datapoints_list:
             current_datapoint_index = datapoints_list.index(datapoint_id)
         else:
             raise ValueError(f"Datapoint ID {datapoint_id} not found in datapoints_list.")
     current_datapoint_id = datapoints_list[current_datapoint_index]
 
-    # Generate datapoint information and explanation
     explanation, datapoint_info = generate_datapoint_info()
     
-    # Display the datapoint information as JSON on the frontend
     api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
-    your_logger.info(f"Datapoint information displayed on frontend for datapoint id: {current_datapoint_id}")
+    your_logger.info(f"Datapoint information displayed for original_id: {current_datapoint_id}")
     
-    # Update the frontend banner with settings
     settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
     api.display(custom_msg=json.dumps(settings_dic, ensure_ascii=True))
-    your_logger.info("Frontend banner updated.")
     
     return explanation.strip()
 
 
 @plugfunc()
-def next_datapoint(datapoint_id=None, username="", datapoint_choice="",**kwargs ):
+def next_datapoint(datapoint_id=None, username="", datapoint_choice="", **kwargs):
     """
-    Moves to the next datapoint and updates the explanation for the chatbot.
-    Whenever this function is called or confirm button is clicked explanation and datapoint_info is updated each time make sure it shows data of updated current datapoint.
+    Moves to the next datapoint (or a specified datapoint), 
+    and updates the explanation for the chatbot.
     """
     global current_datapoint_index, current_datapoint_id
 
-    # Move to the next datapoint
     if datapoint_id is not None:
-        # If datapoint_id is provided, set the current index based on it
         if datapoint_id in datapoints_list:
             current_datapoint_index = datapoints_list.index(datapoint_id)
         else:
             raise ValueError(f"Datapoint ID {datapoint_id} not found in datapoints_list.")
     else:
-        # Default behavior: Move to the next datapoint
         current_datapoint_index = (current_datapoint_index + 1) % len(datapoints_list)
 
     current_datapoint_id = datapoints_list[current_datapoint_index]
 
-    # Generate datapoint information and explanation
     explanation, datapoint_info = generate_datapoint_info()
     
-    # Display the datapoint information as JSON on the frontend
     api.display(custom_msg=json.dumps(datapoint_info, ensure_ascii=True))
-    your_logger.info(f"Datapoint information displayed on frontend for datapoint id: {current_datapoint_id}")
-    
-    # Update the frontend banner with settings
+    your_logger.info(f"Datapoint information displayed for original_id: {current_datapoint_id}")
+
     settings_dic = {"role": "global_settings", "content": {"show_banner": True}}
     api.display(custom_msg=json.dumps(settings_dic, ensure_ascii=True))
-    your_logger.info("Frontend banner updated.")
 
-     # Define the file path
     log_file = "/home/ies/ashri/selections/ashri.txt"
-
-    # Ensure the directory exists
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-
-    # Log the selection with a timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] Username: {username}, Datapoint Choice: {datapoint_choice}\n"
 
@@ -401,17 +423,25 @@ def next_datapoint(datapoint_id=None, username="", datapoint_choice="",**kwargs 
 @plugfunc()
 def explain_with_lime():
     """
-    Generates a LIME explanation for the current datapoint ID.
+    Generates a LIME explanation for the current datapoint (original_id) in X_test_unscaled.
     """
     global current_datapoint_id
 
     try:
-        # Scale the features for the current datapoint
-        features_data = X_test_unscaled.iloc[current_datapoint_id][features].values.reshape(1, -1)
-        scaled_features = scaler.transform(features_data)
-        your_logger.info(f"Generating LIME explanation for datapoint ID: {current_datapoint_id}")
+        # 1) Find the row where 'original_id' == current_datapoint_id
+        matching_rows = X_test_unscaled.index[X_test_unscaled["original_id"] == current_datapoint_id]
+        if len(matching_rows) == 0:
+            raise ValueError(f"No row found with original_id={current_datapoint_id}")
+        row_idx = matching_rows[0]
 
-        # Wrapper function for model predictions compatible with LIME
+        # 2) Extract the features for that row
+        features_data = X_test_unscaled.loc[row_idx, features].values.reshape(1, -1)
+
+        # 3) Scale the features for LIME
+        scaled_features = scaler.transform(features_data)
+        your_logger.info(f"Generating LIME explanation for original_id: {current_datapoint_id}")
+
+        # 4) Define a wrapper function for model predictions (compatible with LIME)
         def predict_proba(X):
             X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
             model.eval()
@@ -419,40 +449,51 @@ def explain_with_lime():
                 probabilities = torch.nn.functional.softmax(model(X_tensor), dim=1).cpu().numpy()
             return probabilities
 
-        # Initialize the LIME explainer on the scaled dataset with modified feature names
+        # 5) Build the background dataset for LIME from all rows in X_test_unscaled
+        #    (scaled version)
+        background_data = scaler.transform(X_test_unscaled[features])
         lime_explainer = LimeTabularExplainer(
-            scaler.transform(X_test_unscaled[features]), 
+            background_data,
             feature_names=[format_feature_name(feature).replace("_", " ") for feature in features],
             class_names=['Canceled', 'Check-Out'],
             mode='classification',
             random_state=42
         )
 
-        # Generate the explanation for the current datapoint
+        # 6) Generate the explanation for the single datapoint
         explanation = lime_explainer.explain_instance(scaled_features[0], predict_proba, num_features=len(features))
 
-        # Format and clean feature names for display
-        explanation_list = [(format_feature_name(feature).replace("_", " "), contribution) for feature, contribution in explanation.as_list() if contribution != 0]
+        # 7) Format and clean feature names for display
+        explanation_list = [
+            (format_feature_name(feature).replace("_", " "), contribution)
+            for feature, contribution in explanation.as_list() if contribution != 0
+        ]
+        # Remove any numerical constraints from the feature names
+        cleaned_feature_names = [
+            re.sub(r"(<|>|<=|>=|==|!=)?\s?-?\d*\.?\d*", "", feat).strip().replace("=", "")
+            for feat, _ in explanation_list
+        ]
+        contributions = [contrib for _, contrib in explanation_list]
 
-        # Remove any numerical ranges, constraints, and equals signs from feature names
-        cleaned_feature_names = [re.sub(r"(<|>|<=|>=|==|!=)?\s?-?\d*\.?\d*", "", feature).strip().replace("=", "") for feature, _ in explanation_list]
-        contributions = [contribution for _, contribution in explanation_list]
+        # 8) Plot only the impactful features with cleaned names
+        fig = px.bar(
+            x=contributions,
+            y=cleaned_feature_names,
+            orientation='h',
+            labels={'x': 'Contribution to Prediction', 'y': 'Feature'},
+            title='LIME Explanation',
+            color=contributions,
+            color_continuous_scale=["red", "green"]
+        )
 
-        # Plot only the impactful features with cleaned names
-        fig = px.bar(x=contributions, y=cleaned_feature_names, orientation='h', 
-                     labels={'x': 'Contribution to Prediction', 'y': 'Feature'},
-                     title='LIME Explanation', 
-                     color=contributions, 
-                     color_continuous_scale=["red", "green"])
-
-        # Generate and display the interactive HTML plot
+        # 9) Generate and display the interactive HTML plot
         html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
-        api.display(html="<!--LIME-->"+html)
+        api.display(html="<!--LIME-->" + html)
 
-        # Convert LIME explanation to text for LLM summary
+        # 10) Convert LIME explanation to text for LLM summary
         lime_text_explanation = explanation.as_list()
-        text_summary = f"LIME Explanation:\n"
-        text_summary += "\n".join([f"{feature.replace('_', ' ')}: {contribution:.4f}" for feature, contribution in lime_text_explanation])
+        text_summary = "LIME Explanation:\n"
+        text_summary += "\n".join([f"{feat.replace('_', ' ')}: {val:.4f}" for feat, val in lime_text_explanation])
 
         return text_summary
 
@@ -460,6 +501,7 @@ def explain_with_lime():
         error_message = f"An error occurred in LIME explanation: {str(e)}"
         api.display(html=f"<h3>{error_message}</h3>")
         return error_message
+
 
 @plugfunc()
 def generate_counterfactual_explanations(num_counterfactuals: int = 5):
@@ -473,7 +515,22 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
 
         # Load test data
         X_test = pd.read_csv(X_test_path.get())
-        y_test = pd.read_csv(y_test_path.get(), header=None, names=["reservation_status"])
+        y_test = pd.read_csv(y_test_path.get(), header=0, names=["reservation_status"])
+        
+        # 2) Find the row in X_test that has original_id == current_datapoint_id
+        matching_rows = X_test.index[X_test["original_id"] == current_datapoint_id]
+        if len(matching_rows) == 0:
+            raise ValueError(f"No row found in X_test with original_id={current_datapoint_id}")
+        row_idx = matching_rows[0]
+
+        # 3) Build the query instance from that row
+        query_instance = X_test.iloc[[row_idx]].copy()
+
+        # 4) For the predicted class, we also look up the row in X_test_unscaled
+        matching_rows_unscaled = X_test_unscaled.index[X_test_unscaled["original_id"] == current_datapoint_id]
+        if len(matching_rows_unscaled) == 0:
+            raise ValueError(f"No row found in X_test_unscaled with original_id={current_datapoint_id}")
+        row_idx_unscaled = matching_rows_unscaled[0]
 
         # Define continuous and categorical features
         continuous_features = ['lead_time', 'adr']
@@ -503,12 +560,9 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         custom_dice_model = CustomPyTorchModel(predict_fn=predict_fn, backend="PYT")
         custom_dice_model.model_type = 'classifier'
         exp = Dice(d, custom_dice_model)
-
-        # Select the current datapoint instance to explain
-        query_instance = X_test.iloc[[current_datapoint_id]].copy()
         
-        # Get model prediction directly using the same approach as in next_datapoint
-        features_data = X_test_unscaled.iloc[current_datapoint_id][features]
+        # Extract the features from X_test_unscaled for model prediction
+        features_data = X_test_unscaled.loc[row_idx_unscaled, features]
         scaled_features_tensor = torch.tensor(scaler.transform(features_data.values.reshape(1, -1)), dtype=torch.float32).to(device)
         
         with torch.no_grad():
@@ -606,8 +660,12 @@ def draw_importances_dashboard(**kwargs) -> str:
         if X_test_filtered_df.empty:
             return "The filtered dataset is empty. Please provide valid filter parameters."
 
-        # Ensure 'reservation_status' is not in the features when scaling
+        # Remove 'reservation_status' from the features when scaling
         y_test_filtered = X_test_filtered_df.pop('reservation_status').values
+
+        # --- Minimal change: if 'original_id' is present, drop it before scaling
+        if 'original_id' in X_test_filtered_df.columns:
+            X_test_filtered_df.drop('original_id', axis=1, inplace=True)
 
         # Use only a random sample of 100 records
         if len(X_test_filtered_df) > 100:
@@ -638,13 +696,16 @@ def draw_importances_dashboard(**kwargs) -> str:
         decoded_sorted_features = decode_features(pd.DataFrame([sorted_features])).iloc[0].tolist()
         formatted_sorted_features = [format_feature_name(feature) for feature in decoded_sorted_features]
 
-        fig = px.bar(x=formatted_sorted_features, y=sorted_shap_values, 
-                     labels={'x': 'Feature', 'y': 'Shapley Value'},
-                     title='Shapley Values')
+        fig = px.bar(
+            x=formatted_sorted_features,
+            y=sorted_shap_values,
+            labels={'x': 'Feature', 'y': 'Shapley Value'},
+            title='Shapley Values'
+        )
 
         # Convert the Plotly figure to an HTML string
         html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
-        api.display(html="<!--SHAP-->"+html)
+        api.display(html="<!--SHAP-->" + html)
 
         # Explanation for LLM with formatted feature names
         explanation = f"""
@@ -663,6 +724,7 @@ def draw_importances_dashboard(**kwargs) -> str:
         api.display(html=f"<h3>{error_message}</h3>")
         return error_message
 
+
 @plugfunc()
 def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> str:
     """
@@ -678,18 +740,6 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
 
     try:
         print("Generating PDP Dashboard...")
-
-        def unify_feature_name(name: str) -> str:
-            """
-            Converts a user-typed feature name into a canonical format 
-            that matches the dataset's column names.
-            E.g., "Market Segment" -> "market_segment"
-                  "Deposit Type"   -> "deposit_type"
-            """
-            result = name.strip().lower().replace(" ", "_")
-            while "__" in result:
-                result = result.replace("__", "_")
-            return result
 
         # 1) Match user-typed feature names to actual columns in 'features'
         validated_pdp_features = []
@@ -725,9 +775,14 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
             min_val = original_values.min()
             max_val = original_values.max()
 
-            # If it's an integer feature, build an integer grid
+            if feature == "market_segment":
+               # only codes are only 0–6:
+               valid_max = len(label_encoders["market_segment"].classes_) - 2
+               max_val = min(max_val, valid_max)
+
+            # build an integer grid
             if feature in INTEGER_FEATURES:
-                possible_values = np.arange(min_val, max_val + 1, 1, dtype=float)
+                possible_values = np.arange(int(min_val), int(max_val) + 1, 1, dtype=int)
                 if len(possible_values) > grid_resolution:
                     indices = np.linspace(0, len(possible_values) - 1, grid_resolution, dtype=int)
                     feature_values = possible_values[indices]
@@ -739,8 +794,7 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
 
             avg_predictions = np.zeros(len(feature_values))
 
-            # For partial dependence, we set the entire column to 'val'
-            # and then compute the average predicted probability for 'target_cls'.
+            
             for i, val in enumerate(feature_values):
                 X_copy_unscaled = X_filtered.copy()
                 X_copy_unscaled[feature] = val
@@ -763,17 +817,35 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
         for feature, formatted_feature in zip(pdp_features, formatted_pdp_features):
             feature_values, avg_predictions = calculate_partial_dependence(feature, target_class)
 
-            # Build a DataFrame for the Plotly line chart
+            # Decode feature values for categorical features
+            decoded_values = []
+            for val in feature_values:
+                X_explain = X_filtered.iloc[:1].copy() 
+                X_explain[feature] = val
+                X_explain_decoded = decode_features(X_explain)
+                decoded_val = X_explain_decoded[feature].iloc[0]
+                
+            
+                if isinstance(decoded_val, (int, float)) and feature not in label_encoders:
+                    if feature in INTEGER_FEATURES:
+                        decoded_val = str(int(round(decoded_val)))
+                    else:
+                        decoded_val = f"{decoded_val:.2f}"
+                
+                decoded_values.append(decoded_val)
+
+            # Build a for the Plotly line chart with both original and decoded values
             df = pd.DataFrame({
-                "Feature Value": feature_values,
+                "Original Value": feature_values,
+                "Decoded Value": decoded_values,
                 "Average Prediction": avg_predictions,
                 "Feature": formatted_feature
             })
             plot_data.append(df)
 
-            # We want to show 10 sample points in the textual explanation
+            # We want to show 12 sample points in the textual explanation
             if len(feature_values) > 1:
-                explanation_indices = np.linspace(0, len(feature_values) - 1, 10, dtype=int)
+                explanation_indices = np.linspace(0, len(feature_values) - 1, 12, dtype=int)
             else:
                 explanation_indices = [0]
 
@@ -781,33 +853,14 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
             min_display = feature_values[0]
             max_display = feature_values[-1]
             explanation += (f"  Range: from {min_display:.2f} to {max_display:.2f}.\n"
-                            "  Below are 10 sample points across this range:\n")
+                            "  Below are 12 sample points across this range:\n")
 
-            # 5) For each sample point, decode the categorical label if applicable
+            # 5) For each sample point, use the already decoded values
             for idx in explanation_indices:
                 val = feature_values[idx]
-                # 5a) For the explanation, decode the feature if we have a label encoder
-                #     or room type mapping. We'll do that by creating a 1-row copy 
-                #     from X_filtered, setting 'feature' to 'val', then calling decode_features.
-                X_explain = X_filtered.iloc[:1].copy()  # single row
-                X_explain[feature] = val
-
-                # decode_features will convert numeric codes to strings (e.g. country code -> "Portugal")
-                X_explain_decoded = decode_features(X_explain)
-                decoded_val = X_explain_decoded[feature].iloc[0]
-
-                # 5b) If it's an integer feature but not label-encoded, we may want to show it as int
-                #     But decode_features will leave it numeric if there's no label encoder
-                #     so we handle fallback formatting if it's still numeric
-                if isinstance(decoded_val, (int, float)) and feature not in label_encoders:
-                    if feature in INTEGER_FEATURES:
-                        decoded_val = str(int(round(decoded_val)))
-                    else:
-                        decoded_val = f"{decoded_val:.2f}"
-
-                # 5c) Get the partial dependence average prediction
                 pred = avg_predictions[idx]
-
+                decoded_val = decoded_values[idx]
+                
                 explanation += f"   - Feature Value: {decoded_val}, Average Prediction: {pred:.4f}\n"
 
         # 6) If no data was built, return an error
@@ -817,14 +870,48 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
         # 7) Combine data for the plot
         full_df = pd.concat(plot_data, ignore_index=True)
 
-        # 8) Plotly line chart
+        # 8) Create Plotly figure with decoded values for categorical features
         fig = px.line(
             full_df,
-            x="Feature Value",
+            x="Original Value",  
             y="Average Prediction",
             color="Feature",
             title=f"Partial Dependence Plot for [{', '.join(formatted_pdp_features)}] ({target_label})"
         )
+
+        # Update x-axis labels with decoded values
+        for feature_name in formatted_pdp_features:
+            feature_df = full_df[full_df['Feature'] == feature_name]
+            
+           
+            is_categorical = all(isinstance(val, str) for val in feature_df['Decoded Value']) and not all(
+                str(orig) == decoded for orig, decoded in zip(feature_df['Original Value'], feature_df['Decoded Value'])
+            )
+            
+            if is_categorical:
+                
+                if len(feature_df) > 12:
+                    indices = np.linspace(0, len(feature_df) - 1, 12, dtype=int)
+                    subset_df = feature_df.iloc[indices]
+                else:
+                    subset_df = feature_df
+                
+                # Create a trace-specific axis
+                fig.update_traces(
+                    x=feature_df['Original Value'],
+                    customdata=feature_df['Decoded Value'],
+                    hovertemplate='Value: %{customdata}<br>Prediction: %{y:.4f}',
+                    selector=dict(name=feature_name)
+                )
+                
+                # Only update x-axis if this is the only feature (otherwise it gets confusing)
+                if len(formatted_pdp_features) == 1:
+                    fig.update_xaxes(
+                        tickmode='array',
+                        tickvals=subset_df['Original Value'].tolist(),
+                        ticktext=subset_df['Decoded Value'].tolist(),
+                        title="Feature Value"
+                    )
 
         # 9) Display the plot in the UI
         html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
@@ -838,30 +925,18 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
         api.display(html=f"<h3>{error_message}</h3>")
         return error_message
 
-def unify_feature_name(name: str) -> str:
-    """
-    Converts a user-typed feature name into a canonical format 
-    that matches the dataset's column names.
-    E.g., "Market Segment" -> "market_segment"
-          "Deposit Type"   -> "deposit_type"
-    """
-    result = name.strip().lower().replace(" ", "_")
-    while "__" in result:
-        result = result.replace("__", "_")
-    return result
-
-
 @plugfunc()
 def generate_histogram(feature_name, split_by_target=False):
     """
     Generates a histogram for the specified feature, with an option to split by target variable.
+    Returns both visual plot and text summary of histogram values for LLM interpretation.
     
     Args:
         feature_name (str): Name of the feature to generate histogram for.
         split_by_target (bool, optional): Whether to split the histogram by target variable. Defaults to False.
     
     Returns:
-        str: Description of the generated histogram
+        str: Description of the generated histogram with summary statistics
     """
     global X_test_unscaled, y_test
     
@@ -889,6 +964,9 @@ def generate_histogram(feature_name, split_by_target=False):
             target_labels = {0: 'Canceled', 1: 'Check-Out'}
             data['target_label'] = data['reservation_status'].map(target_labels)
         
+        # Initialize text summary for LLM
+        summary_text = []
+        
         # Handle categorical features
         if feature_name in label_encoders:
             # Decode the categorical feature
@@ -902,12 +980,33 @@ def generate_histogram(feature_name, split_by_target=False):
                                   labels={'count': 'Count', feature_name: feature_title},
                                   color_discrete_map={'Canceled': 'salmon', 'Check-Out': 'skyblue'},
                                   barmode='group')
+                
+                # Generate summary statistics for LLM
+                summary = data.groupby(['target_label', feature_name]).size().reset_index(name='count')
+                summary_text.append(f"Distribution of {feature_title} by reservation status:")
+                
+                # Get unique categories for better organization
+                categories = sorted(data[feature_name].unique())
+                
+                for category in categories:
+                    summary_text.append(f"\n{category}:")
+                    for status in ['Canceled', 'Check-Out']:
+                        count = summary[(summary['target_label'] == status) & (summary[feature_name] == category)]['count'].sum()
+                        percentage = 100 * count / len(data[data['target_label'] == status])
+                        summary_text.append(f"  - {status}: {count} bookings ({percentage:.1f}%)")
             else:
                 # Create a count plot for categorical data without target split
                 fig = px.histogram(data, x=feature_name, 
                                   title=f'Distribution of {feature_title}',
                                   labels={'count': 'Count', feature_name: feature_title},
                                   color_discrete_sequence=['skyblue'])
+                
+                # Generate summary statistics for LLM
+                summary = data[feature_name].value_counts().sort_index()
+                summary_text.append(f"Distribution of {feature_title}:")
+                for category, count in summary.items():
+                    percentage = 100 * count / len(data)
+                    summary_text.append(f"  - {category}: {count} bookings ({percentage:.1f}%)")
             
             # Rotate x-axis labels for better readability for categorical variables
             fig.update_layout(xaxis_tickangle=-45)
@@ -920,6 +1019,22 @@ def generate_histogram(feature_name, split_by_target=False):
                                  labels={'count': 'Count', feature_name: feature_title},
                                  color_discrete_map={'Canceled': 'salmon', 'Check-Out': 'skyblue'},
                                  opacity=0.7)
+                
+                # Generate summary statistics for LLM
+                summary_text.append(f"Distribution of {feature_title} by reservation status:")
+                
+                for status in ['Canceled', 'Check-Out']:
+                    status_data = data[data['target_label'] == status][feature_name]
+                    summary_text.append(f"\n{status}:")
+                    summary_text.append(f"  - Count: {len(status_data)}")
+                    summary_text.append(f"  - Min: {status_data.min():.2f}")
+                    summary_text.append(f"  - Max: {status_data.max():.2f}")
+                    summary_text.append(f"  - Mean: {status_data.mean():.2f}")
+                    summary_text.append(f"  - Median: {status_data.median():.2f}")
+                    
+                    # Add percentile information
+                    summary_text.append(f"  - 25th percentile: {status_data.quantile(0.25):.2f}")
+                    summary_text.append(f"  - 75th percentile: {status_data.quantile(0.75):.2f}")
             else:
                 # Create a standard histogram for numeric data without target split
                 fig = px.histogram(data, x=feature_name, 
@@ -932,6 +1047,28 @@ def generate_histogram(feature_name, split_by_target=False):
                 fig.add_vline(x=mean_val, line_dash="dash", line_color="red", 
                               annotation_text=f"Mean: {mean_val:.2f}", 
                               annotation_position="top right")
+                
+                # Generate summary statistics for LLM
+                summary_text.append(f"Distribution of {feature_title}:")
+                summary_text.append(f"  - Min: {data[feature_name].min():.2f}")
+                summary_text.append(f"  - Max: {data[feature_name].max():.2f}")
+                summary_text.append(f"  - Mean: {data[feature_name].mean():.2f}")
+                summary_text.append(f"  - Median: {data[feature_name].median():.2f}")
+                
+                # Add percentile information
+                summary_text.append(f"  - 25th percentile: {data[feature_name].quantile(0.25):.2f}")
+                summary_text.append(f"  - 75th percentile: {data[feature_name].quantile(0.75):.2f}")
+                
+                # Add histogram bin information
+                hist_values, bin_edges = np.histogram(data[feature_name], bins=10)
+                summary_text.append("\nHistogram bins:")
+                
+                for i in range(len(hist_values)):
+                    bin_start = bin_edges[i]
+                    bin_end = bin_edges[i+1]
+                    count = hist_values[i]
+                    percentage = 100 * count / len(data)
+                    summary_text.append(f"  - {bin_start:.2f} to {bin_end:.2f}: {count} bookings ({percentage:.1f}%)")
         
         # Generate the interactive HTML plot
         html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
@@ -940,10 +1077,16 @@ def generate_histogram(feature_name, split_by_target=False):
         plot_id = f"HISTOGRAM_{feature_name}" + ("_BY_TARGET" if split_by_target else "")
         api.display(html=f"<!--{plot_id}-->{html}")
         
+        # Join all summary text parts
+        text_summary = "\n".join(summary_text)
+        
+        return_message = f"Generated histogram for {feature_title}"
         if split_by_target:
-            return f"Generated histogram for {feature_title} split by reservation status (Canceled vs Check-Out)."
+            return_message += " split by reservation status (Canceled vs Check-Out)."
         else:
-            return f"Generated histogram for {feature_title}."
+            return_message += "."
+        
+        return f"{return_message}\n\n{text_summary}"
     
     except Exception as e:
         error_message = f"An error occurred while generating the histogram: {str(e)}"
