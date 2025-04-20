@@ -46,7 +46,11 @@ model = None
 scaler = None
 X_test_unscaled = None
 y_test = None
-datapoints_list = [111235, 85498, 56168, 22730, 81743, 52028, 8723, 78335, 80601, 68689, 16948, 37601, 68227, 60052, 106685,10233 ]
+datapoints_list =  [8723, 10233, 52028, 16948, 16376, 13260, 27378, 22730, 23855, 28133,
+    30195, 56168, 60052, 85498, 37601, 55780, 76664, 61754, 68227, 68689,
+    71076, 78335, 80601, 81743, 82393, 84583, 96373, 99102, 106685, 111235]
+
+#datapoints_list = [85498, 106685]
 current_datapoint_index = 0 
 current_datapoint_id = None
 features = [
@@ -286,11 +290,40 @@ def generate_datapoint_info():
         confidence_score = round(confidence_score, 2)
         predicted_class = output.argmax().item()
 
-    predicted_class_str = 'Canceled' if predicted_class == 0 else 'Check-Out'
+    predicted_class_str = 'Cancellation' if predicted_class == 0 else 'Check-Out'
 
     # 5) Prepare JSON structure
     datapoint_info = {
         "role": "datapoint",
+        "survey": {
+                "title": "Survey",
+                "questions": [
+                      {
+                        "id": "q1",
+                        "text": "How confident are you in your decision?",
+                        "scaleMin": 1,
+                        "scaleMax": 5,
+                        "labelMin": "not confident at all",
+                        "labelMax": "very confident",
+                      },
+                      {
+                        "id": "q2",
+                        "text": "How useful did you find the AI assistant's responses?",
+                        "scaleMin": 1,
+                        "scaleMax": 5,
+                        "labelMin": "not useful at all",
+                        "labelMax": "very useful",
+                      },
+                      {
+                        "id": "q3",
+                        "text": "How satisfied were you with the overall support from the AI assistant?",
+                        "scaleMin": 1,
+                        "scaleMax": 5,
+                        "labelMin": "not satisfied at all",
+                        "labelMax": "very satisfied",
+                      },
+                ],
+            },
         "content": {
             "prediction": predicted_class_str,
             "confidence": confidence_score,
@@ -301,7 +334,9 @@ def generate_datapoint_info():
                     "value": decoded_features_data[feature]
                 }
                 for feature in display_order
-            }
+            },
+            "description":"Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.",
+            
         }
     }
 
@@ -382,7 +417,7 @@ def show_datapoint(datapoint_id=None):
 
 
 @plugfunc()
-def next_datapoint(datapoint_id=None, username="", datapoint_choice="", **kwargs):
+def next_datapoint(datapoint_id=None, username="", datapoint_choice="",answers="", **kwargs):
     """
     Moves to the next datapoint (or a specified datapoint), 
     and updates the explanation for the chatbot.
@@ -410,7 +445,7 @@ def next_datapoint(datapoint_id=None, username="", datapoint_choice="", **kwargs
     log_file = "/home/ies/ashri/selections/ashri.txt"
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_entry = f"[{timestamp}] Username: {username}, Datapoint Choice: {datapoint_choice}\n"
+    log_entry = f"[{timestamp}] Username: {username}, Datapoint Choice: {datapoint_choice}, Answers:{answers}\n"
 
     with open(log_file, "a") as f:
         f.write(log_entry)
@@ -455,7 +490,7 @@ def explain_with_lime():
         lime_explainer = LimeTabularExplainer(
             background_data,
             feature_names=[format_feature_name(feature).replace("_", " ") for feature in features],
-            class_names=['Canceled', 'Check-Out'],
+            class_names=['Cancelation', 'Check-Out'],
             mode='classification',
             random_state=42
         )
@@ -485,9 +520,17 @@ def explain_with_lime():
             color=contributions,
             color_continuous_scale=["red", "green"]
         )
+        fig.update_layout(dragmode=False)
+
+        # Disable mouse scroll zoom and remove zoom/pan buttons in the mode bar
+        config_dict = {
+          'displayModeBar': False,
+          'scrollZoom': False,
+          'modeBarButtonsToRemove': ['zoom2d', 'pan2d', 'select2d', 'lasso2d', 'zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d']
+        }
 
         # 9) Generate and display the interactive HTML plot
-        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config=config_dict)
         api.display(html="<!--LIME-->" + html)
 
         # 10) Convert LIME explanation to text for LLM summary
@@ -590,7 +633,7 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
         visual_df = pd.concat([original_instance_decoded, counterfactuals_data_decoded], ignore_index=True)
 
         # Replace `1` and `0` in `reservation_status` with `Check-Out` and `Canceled`
-        visual_df['reservation_status'] = visual_df['reservation_status'].replace({1: 'Check-Out', 0: 'Canceled'})
+        visual_df['reservation_status'] = visual_df['reservation_status'].replace({1: 'Check-Out', 0: 'Cancelation'})
 
         # Add row labels
         row_labels = ['Original Instance'] + [f'Counterfactual {i}' for i in range(1, len(visual_df))]
@@ -639,24 +682,33 @@ def generate_counterfactual_explanations(num_counterfactuals: int = 5):
 
 
 
+import os
+
 @plugfunc()
 def draw_importances_dashboard(**kwargs) -> str:
     """
     Draws a Shapely feature importances dashboard, allowing filtering by feature columns and target variable.
-
+    
     Example usage:
     - draw_importances_dashboard(): Full dataset.
     - draw_importances_dashboard(hotel=1, market_segment=3): Filtered dataset.
-
+    
     :param kwargs: Filter criteria to apply to the dataset.
     :return: Explanation with HTML-embedded bar chart of feature importances for LLM.
     """
     try:
+        # Check if saved SHAP plot exists; if so, read and display it.
+        SHAP_PLOT_FILE = "shap_plot.html"
+        if os.path.exists(SHAP_PLOT_FILE):
+            with open(SHAP_PLOT_FILE, "r") as f:
+                saved_html = f.read()
+            api.display(html="<!--SHAP-->" + saved_html)
+            return "Displayed saved SHAP plot."
+        
         print("Generating feature importance dashboard...")
 
         # Apply filtering to dataset
         X_test_filtered_df = filter_data(X_test_unscaled.copy(), **kwargs) if kwargs else X_test_unscaled.copy()
-
         if X_test_filtered_df.empty:
             return "The filtered dataset is empty. Please provide valid filter parameters."
 
@@ -703,19 +755,33 @@ def draw_importances_dashboard(**kwargs) -> str:
             title='Shapley Values'
         )
 
-        # Convert the Plotly figure to an HTML string
-        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        # Disable drag interactions (thus preventing zoom or pan)
+        fig.update_layout(dragmode=False)
+
+        # Disable mouse scroll zoom and remove zoom/pan buttons in the mode bar
+        config_dict = {
+            'displayModeBar': False,
+            'scrollZoom': False,
+            'modeBarButtonsToRemove': ['zoom2d', 'pan2d', 'select2d', 'lasso2d',
+                                       'zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d']
+        }
+
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config=config_dict)
         api.display(html="<!--SHAP-->" + html)
+
+        # Save the generated HTML for future calls
+        with open(SHAP_PLOT_FILE, "w") as f:
+            f.write(html)
 
         # Explanation for LLM with formatted feature names
         explanation = f"""
         Feature Importance Analysis:
 
-        This dashboard visualizes the feature importance based on Shapely values, illustrating which features have the most significant impact on the model's predictions. 
+        This dashboard visualizes the feature importance based on Shapley values, illustrating which features have the most significant impact on the model's predictions.
         
         All Feature Importances:
         """ + "\n".join([f"- {feature}: {importance:.4f}" for feature, importance in zip(formatted_sorted_features, sorted_shap_values)]) + "\n\n" + \
-        "Higher Shapely values indicate greater influence on the model's predictions."
+        "Higher Shapley values indicate greater influence on the model's predictions."
 
         return explanation.strip()
 
@@ -725,15 +791,16 @@ def draw_importances_dashboard(**kwargs) -> str:
         return error_message
 
 
+
 @plugfunc()
 def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> str:
     """
     Draws Partial Dependence Plots (PDP) for selected features on the same plot.
     Decodes categorical feature values in the LLM explanation (e.g. "Portugal" instead of "22").
-    If no target_class is provided, the user should choose between 'Canceled' (0) or 'Check-Out' (1).
+    If no target_class is provided, the user should choose between 'Cancelation' (0) or 'Check-Out' (1).
 
     :param pdp_features: List of features for PDPs (e.g., ["Market Segment", "deposit type"]).
-    :param target_class: Target class for PDP (0 = 'Canceled', 1 = 'Check-Out').
+    :param target_class: Target class for PDP (0 = 'Cancelation', 1 = 'Check-Out').
     :param kwargs: Optional filter parameters (e.g., lead_time=('>=', 10)).
     :return: Text explanation string (the PDP plot is displayed via api.display).
     """
@@ -811,7 +878,7 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
         # 4) Build the data for plotting and the explanation
         plot_data = []
         explanation = ""
-        target_label = "Canceled" if target_class == 0 else "Check-Out"
+        target_label = "Cancelation" if target_class == 0 else "Check-Out"
         explanation += f"Partial Dependence Plot for target class '{target_label}':\n"
 
         for feature, formatted_feature in zip(pdp_features, formatted_pdp_features):
@@ -912,9 +979,17 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
                         ticktext=subset_df['Decoded Value'].tolist(),
                         title="Feature Value"
                     )
+        
+        fig.update_layout(dragmode=False)
 
+        # Disable mouse scroll zoom and remove zoom/pan buttons in the mode bar
+        config_dict = {
+            'displayModeBar': False,
+            'scrollZoom': False,
+            'modeBarButtonsToRemove': ['zoom2d', 'pan2d', 'select2d', 'lasso2d', 'zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d']
+        }
         # 9) Display the plot in the UI
-        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config=config_dict)
         api.display(html="<!--PDP-->" + html)
 
         # 10) Return the textual explanation
@@ -929,14 +1004,14 @@ def draw_pdp_dashboard(pdp_features: list, target_class: int = 0, **kwargs) -> s
 def generate_histogram(feature_name, split_by_target=False):
     """
     Generates a histogram for the specified feature, with an option to split by target variable.
-    Returns both visual plot and text summary of histogram values for LLM interpretation.
+    Returns both an interactive HTML plot and a text summary of histogram values for LLM interpretation.
     
     Args:
-        feature_name (str): Name of the feature to generate histogram for.
+        feature_name (str): Name of the feature to generate a histogram for.
         split_by_target (bool, optional): Whether to split the histogram by target variable. Defaults to False.
     
     Returns:
-        str: Description of the generated histogram with summary statistics
+        str: A description of the generated histogram with summary statistics.
     """
     global X_test_unscaled, y_test
     
@@ -944,10 +1019,9 @@ def generate_histogram(feature_name, split_by_target=False):
         # Use the test data
         data = X_test_unscaled.copy()
         
-        # Check if a specific feature was requested
+        # Ensure feature name exists (using a canonical form if needed)
         if not feature_name:
             return "Please specify a feature name. Plotting all features simultaneously is not supported."
-        
         if feature_name not in data.columns:
             feature_name = unify_feature_name(feature_name)
             if feature_name not in data.columns:
@@ -960,70 +1034,110 @@ def generate_histogram(feature_name, split_by_target=False):
         # Add target variable if needed
         if split_by_target:
             data['reservation_status'] = y_test
-            # Prepare target variable labels
-            target_labels = {0: 'Canceled', 1: 'Check-Out'}
+            target_labels = {0: 'Cancelation', 1: 'Check-Out'}
             data['target_label'] = data['reservation_status'].map(target_labels)
         
-        # Initialize text summary for LLM
-        summary_text = []
+        # Apply full decoding: room type mapping, month name conversion, etc.
+        data = decode_features(data)
         
-        # Handle categorical features
-        if feature_name in label_encoders:
-            # Decode the categorical feature
-            feature_data = data[feature_name].copy()
-            data[feature_name] = pd.Series(label_encoders[feature_name].inverse_transform(feature_data.astype(int)))
-            
+        # Specific filtering:
+        if feature_name == "market_segment":
+            data = data[data[feature_name] != "Undefined"]
+        if feature_name == "country":
+            data = data[data[feature_name] != "Unknown"]
+        
+        # Determine if the feature is categorical (dtype object)
+        is_categorical = (data[feature_name].dtype == object)
+        
+        summary_text = []  # For text summary
+        
+        # Create the plot based on whether the feature is categorical or numeric
+        if is_categorical:
+            # Build the histogram for categorical features
             if split_by_target:
-                # Create grouped bar chart for categorical data with target split
-                fig = px.histogram(data, x=feature_name, color='target_label',
-                                  title=f'Distribution of {feature_title} by Reservation Status',
-                                  labels={'count': 'Count', feature_name: feature_title},
-                                  color_discrete_map={'Canceled': 'salmon', 'Check-Out': 'skyblue'},
-                                  barmode='group')
-                
-                # Generate summary statistics for LLM
+                # For arrival_date_month, supply a custom order
+                if feature_name == "arrival_date_month":
+                    fig = px.histogram(
+                        data, 
+                        x=feature_name, 
+                        color='target_label',
+                        title=f'Distribution of {feature_title} by Reservation Status',
+                        labels={'count': 'Count', feature_name: feature_title},
+                        color_discrete_map={'Cancelation': 'salmon', 'Check-Out': 'skyblue'},
+                        barmode='group',
+                        category_orders={
+                            feature_name: [
+                                "January", "February", "March", "April", "May", "June",
+                                "July", "August", "September", "October", "November", "December"
+                            ]
+                        }
+                    )
+                else:
+                    fig = px.histogram(
+                        data, 
+                        x=feature_name, 
+                        color='target_label',
+                        title=f'Distribution of {feature_title} by Reservation Status',
+                        labels={'count': 'Count', feature_name: feature_title},
+                        color_discrete_map={'Cancelation': 'salmon', 'Check-Out': 'skyblue'},
+                        barmode='group'
+                    )
                 summary = data.groupby(['target_label', feature_name]).size().reset_index(name='count')
                 summary_text.append(f"Distribution of {feature_title} by reservation status:")
-                
-                # Get unique categories for better organization
                 categories = sorted(data[feature_name].unique())
-                
                 for category in categories:
                     summary_text.append(f"\n{category}:")
-                    for status in ['Canceled', 'Check-Out']:
+                    for status in ['Cancelation', 'Check-Out']:
                         count = summary[(summary['target_label'] == status) & (summary[feature_name] == category)]['count'].sum()
                         percentage = 100 * count / len(data[data['target_label'] == status])
                         summary_text.append(f"  - {status}: {count} bookings ({percentage:.1f}%)")
             else:
-                # Create a count plot for categorical data without target split
-                fig = px.histogram(data, x=feature_name, 
-                                  title=f'Distribution of {feature_title}',
-                                  labels={'count': 'Count', feature_name: feature_title},
-                                  color_discrete_sequence=['skyblue'])
-                
-                # Generate summary statistics for LLM
+                # Categorical data without splitting by target.
+                if feature_name == "arrival_date_month":
+                    fig = px.histogram(
+                        data, 
+                        x=feature_name, 
+                        title=f'Distribution of {feature_title}',
+                        labels={'count': 'Count', feature_name: feature_title},
+                        color_discrete_sequence=['skyblue'],
+                        category_orders={
+                            feature_name: [
+                                "January", "February", "March", "April", "May", "June",
+                                "July", "August", "September", "October", "November", "December"
+                            ]
+                        }
+                    )
+                else:
+                    fig = px.histogram(
+                        data, 
+                        x=feature_name, 
+                        title=f'Distribution of {feature_title}',
+                        labels={'count': 'Count', feature_name: feature_title},
+                        color_discrete_sequence=['skyblue']
+                    )
                 summary = data[feature_name].value_counts().sort_index()
                 summary_text.append(f"Distribution of {feature_title}:")
                 for category, count in summary.items():
                     percentage = 100 * count / len(data)
                     summary_text.append(f"  - {category}: {count} bookings ({percentage:.1f}%)")
             
-            # Rotate x-axis labels for better readability for categorical variables
+            # Rotate x-axis labels for better readability
             fig.update_layout(xaxis_tickangle=-45)
+        
         else:
             # Handle numeric features
             if split_by_target:
-                # Create overlapping histograms for numeric data with target split
-                fig = px.histogram(data, x=feature_name, color='target_label',
-                                 title=f'Distribution of {feature_title} by Reservation Status',
-                                 labels={'count': 'Count', feature_name: feature_title},
-                                 color_discrete_map={'Canceled': 'salmon', 'Check-Out': 'skyblue'},
-                                 opacity=0.7)
-                
-                # Generate summary statistics for LLM
+                fig = px.histogram(
+                    data, 
+                    x=feature_name, 
+                    color='target_label',
+                    title=f'Distribution of {feature_title} by Reservation Status',
+                    labels={'count': 'Count', feature_name: feature_title},
+                    color_discrete_map={'Cancelation': 'salmon', 'Check-Out': 'skyblue'},
+                    opacity=0.7
+                )
                 summary_text.append(f"Distribution of {feature_title} by reservation status:")
-                
-                for status in ['Canceled', 'Check-Out']:
+                for status in ['Cancelation', 'Check-Out']:
                     status_data = data[data['target_label'] == status][feature_name]
                     summary_text.append(f"\n{status}:")
                     summary_text.append(f"  - Count: {len(status_data)}")
@@ -1031,38 +1145,29 @@ def generate_histogram(feature_name, split_by_target=False):
                     summary_text.append(f"  - Max: {status_data.max():.2f}")
                     summary_text.append(f"  - Mean: {status_data.mean():.2f}")
                     summary_text.append(f"  - Median: {status_data.median():.2f}")
-                    
-                    # Add percentile information
                     summary_text.append(f"  - 25th percentile: {status_data.quantile(0.25):.2f}")
                     summary_text.append(f"  - 75th percentile: {status_data.quantile(0.75):.2f}")
             else:
-                # Create a standard histogram for numeric data without target split
-                fig = px.histogram(data, x=feature_name, 
-                                 title=f'Distribution of {feature_title}',
-                                 labels={'count': 'Count', feature_name: feature_title},
-                                 color_discrete_sequence=['skyblue'])
-                
-                # Add a mean line to numeric histograms
+                fig = px.histogram(
+                    data, 
+                    x=feature_name, 
+                    title=f'Distribution of {feature_title}',
+                    labels={'count': 'Count', feature_name: feature_title},
+                    color_discrete_sequence=['skyblue']
+                )
                 mean_val = data[feature_name].mean()
                 fig.add_vline(x=mean_val, line_dash="dash", line_color="red", 
                               annotation_text=f"Mean: {mean_val:.2f}", 
                               annotation_position="top right")
-                
-                # Generate summary statistics for LLM
                 summary_text.append(f"Distribution of {feature_title}:")
                 summary_text.append(f"  - Min: {data[feature_name].min():.2f}")
                 summary_text.append(f"  - Max: {data[feature_name].max():.2f}")
                 summary_text.append(f"  - Mean: {data[feature_name].mean():.2f}")
                 summary_text.append(f"  - Median: {data[feature_name].median():.2f}")
-                
-                # Add percentile information
                 summary_text.append(f"  - 25th percentile: {data[feature_name].quantile(0.25):.2f}")
                 summary_text.append(f"  - 75th percentile: {data[feature_name].quantile(0.75):.2f}")
-                
-                # Add histogram bin information
                 hist_values, bin_edges = np.histogram(data[feature_name], bins=10)
                 summary_text.append("\nHistogram bins:")
-                
                 for i in range(len(hist_values)):
                     bin_start = bin_edges[i]
                     bin_end = bin_edges[i+1]
@@ -1070,19 +1175,26 @@ def generate_histogram(feature_name, split_by_target=False):
                     percentage = 100 * count / len(data)
                     summary_text.append(f"  - {bin_start:.2f} to {bin_end:.2f}: {count} bookings ({percentage:.1f}%)")
         
-        # Generate the interactive HTML plot
-        html = fig.to_html(include_plotlyjs=False, full_html=False, config={'displayModeBar': False})
+        # For features other than arrival_date_month, use the trace order
+        if feature_name != "arrival_date_month":
+            fig.update_xaxes(categoryorder="trace")
+
+        fig.update_layout(dragmode=False)
+        config_dict = {
+            'displayModeBar': False,
+            'scrollZoom': False,
+            'modeBarButtonsToRemove': ['zoom2d', 'pan2d', 'select2d', 'lasso2d',
+                                       'zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d']
+        }    
         
-        # Use a unique identifier for the histogram
+        html = fig.to_html(include_plotlyjs=False, full_html=False, config=config_dict)
         plot_id = f"HISTOGRAM_{feature_name}" + ("_BY_TARGET" if split_by_target else "")
         api.display(html=f"<!--{plot_id}-->{html}")
         
-        # Join all summary text parts
         text_summary = "\n".join(summary_text)
-        
         return_message = f"Generated histogram for {feature_title}"
         if split_by_target:
-            return_message += " split by reservation status (Canceled vs Check-Out)."
+            return_message += " split by reservation status (Cancelation vs Check-Out)."
         else:
             return_message += "."
         
@@ -1093,3 +1205,6 @@ def generate_histogram(feature_name, split_by_target=False):
         your_logger.error(error_message)
         api.display(html=f"<h3>{error_message}</h3>")
         return error_message
+
+
+
